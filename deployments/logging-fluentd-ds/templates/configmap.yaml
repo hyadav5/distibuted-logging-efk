@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-ds-config
+  namespace: {{.Release.Namespace}}
+  labels:
+    k8s-app: fluentd-logging
+data:
+  fluent.conf: |
+    <source>
+      @type tail
+      tag kubernetes.*
+      path /var/log/containers/*es-master*.log
+      pos_file /var/log/containers/access.log.pos
+      keep_time_key true
+      read_from_head true
+      format json
+    </source>
+
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+    </filter>
+
+    <match kubernetes.**>
+      @type forward
+      send_timeout 60s
+      recover_wait 5s
+      hard_timeout 60s
+
+      <server>
+        name worker
+        host {{.Values.fluentd.host}}.{{.Release.Namespace}}
+        port {{.Values.fluentd.port}}
+        weight 60
+      </server>
+ 
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/daemon.buffer
+        chunk_limit_size 16m
+        flush_mode interval
+        flush_interval 20s
+        flush_thread_count 2
+        overflow_action block
+        retry_forever true
+        retry_type periodic
+        retry_wait 12s
+        total_limit_size 4g
+      </buffer>
+    </match>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: curator-init-config
+data:
+  actions.yml: |-
+    ---
+    # Remember, leave a key empty if there is no value.  None will be a string,
+    # not a Python "NoneType"
+    #
+    # Also remember that all examples have 'disable_action' set to True.  If you
+    # want to use this action as a template, be sure to set this to False after
+    # copying it.
+    actions:
+      1:
+        action: create_index
+        description: "Create the esmaster index as named, with the specified extra settings."
+        options:
+          name: "<esmaster-{now{yyyy-MM-dd't'HH.mm.ss}}>"
+          continue_if_exception: True
+          disable_action: False
+          extra_settings:
+            settings:
+              number_of_shards: 3
+              number_of_replicas: 1
+              refresh_interval: 20s
+      2:
+        action: alias
+        description: "Associate esmaster alias for an index ."
+        options:
+          name: esmaster
+          warn_if_no_indices: True
+          continue_if_exception: True
+          disable_action: False
+        remove:
+          filters:
+          - filtertype: pattern
+            kind: prefix
+            value: esmaster-
+        add:
+          filters:
+          - filtertype: pattern
+            kind: prefix
+            value: esmaster-
+          - filtertype: count
+            count: 1
+            use_age: True
+            source: creation_date
+            exclude: False
+
+  config.yml: |-
+    ---
+    # Remember, leave a key empty if there is no value.  None will be a string,
+    # not a Python "NoneType"
+    client:
+      hosts: "{{.Values.elasticsearch.host}}.{{.Release.Namespace}}"
+      port: "{{.Values.elasticsearch.port}}"
+      url_prefix:
+      use_ssl: False
+      certificate:
+      client_cert:
+      client_key:
+      ssl_no_validate: False
+      http_auth:
+      timeout: 60
+      master_only: False
+
+    logging:
+      loglevel: INFO
+      logfile:
+      logformat: default
+      blacklist: ['elasticsearch', 'urllib3']
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-aggregator-config
+  namespace: {{.Release.Namespace}}
+  labels:
+    k8s-app: fluentd-logging
+data:
+  fluent.conf: |
+    <source>
+      @type forward
+      bind 0.0.0.0
+      port  24224
+    </source>
+
+    <match kubernetes.var.log.containers.es-master-*.*>
+      @type elasticsearch
+      logstash_format false
+      host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+      port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+      index_name esmaster
+      type_name logs
+      <buffer>
+        @type memory
+        chunk_limit_size 16m
+        flush_mode interval
+        flush_thread_burst_interval 1
+        flush_thread_interval 1
+        flush_interval 1s
+        flush_thread_count 9
+        overflow_action block
+        retry_forever true
+        retry_type periodic
+        retry_wait 12s
+      </buffer>
+    </match>
